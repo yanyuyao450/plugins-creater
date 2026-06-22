@@ -3,24 +3,60 @@
 set -e
 
 echo "=================================="
-echo "Enterprise sing-box Reality Setup"
+echo "sing-box Reality Enterprise v2"
+echo "Auto Version + Anti 404 Fix"
 echo "=================================="
 
 # ===== root check =====
 if [ "$EUID" -ne 0 ]; then
-  echo "Run as root"
+  echo "❌ 请使用 root 运行"
   exit 1
 fi
 
-# ===== install deps =====
+# ===== deps =====
 apt update -y
-apt install -y curl ufw jq
+apt install -y curl jq ufw wget tar
 
-# ===== install sing-box =====
-bash <(curl -Ls https://raw.githubusercontent.com/SagerNet/sing-box/releases/download/v1.9.0/install.sh)
+# ===== get latest version (方案2核心) =====
+echo "[1/7] 获取 sing-box 最新版本..."
 
-# ===== system tuning (BBR + TCP) =====
-echo "[1] enabling BBR + TCP tuning..."
+SB_VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
+
+if [[ -z "$SB_VERSION" || "$SB_VERSION" == "null" ]]; then
+  echo "❌ 获取版本失败"
+  exit 1
+fi
+
+echo "✔ 最新版本: $SB_VERSION"
+
+# ===== download =====
+echo "[2/7] 下载 sing-box..."
+
+URL="https://github.com/SagerNet/sing-box/releases/download/${SB_VERSION}/sing-box-${SB_VERSION}-linux-amd64.tar.gz"
+
+curl -fL "$URL" -o sing-box.tar.gz
+
+if [ ! -f sing-box.tar.gz ]; then
+  echo "❌ 下载失败（可能版本不存在）"
+  exit 1
+fi
+
+tar -xzf sing-box.tar.gz
+
+install -m 755 sing-box-${SB_VERSION}-linux-amd64/sing-box /usr/local/bin/sing-box
+
+rm -rf sing-box.tar.gz sing-box-${SB_VERSION}-linux-amd64
+
+# ===== verify =====
+if ! command -v sing-box >/dev/null 2>&1; then
+  echo "❌ sing-box 安装失败"
+  exit 1
+fi
+
+echo "✔ sing-box 安装成功"
+
+# ===== sysctl (BBR) =====
+echo "[3/7] 优化网络..."
 
 cat >> /etc/sysctl.conf <<EOF
 
@@ -33,25 +69,19 @@ net.core.netdev_max_backlog=250000
 net.ipv4.tcp_keepalive_time=300
 net.ipv4.tcp_keepalive_intvl=30
 net.ipv4.tcp_keepalive_probes=5
-
-net.core.rmem_max=67108864
-net.core.wmem_max=67108864
-
-net.ipv4.tcp_rmem=4096 87380 67108864
-net.ipv4.tcp_wmem=4096 65536 67108864
 EOF
 
 sysctl -p
 
 # ===== firewall =====
-echo "[2] configuring firewall..."
+echo "[4/7] 防火墙设置..."
 
 ufw allow 443/tcp
 ufw allow OpenSSH
 ufw --force enable
 
-# ===== variables =====
-echo "[3] generating config..."
+# ===== params =====
+echo "[5/7] 生成配置..."
 
 DOMAIN="www.microsoft.com"
 PORT=443
@@ -79,7 +109,6 @@ cat > /etc/sing-box/config.json <<EOF
   "inbounds": [
     {
       "type": "vless",
-      "tag": "reality-in",
       "listen": "::",
       "listen_port": $PORT,
 
@@ -126,7 +155,7 @@ cat > /etc/sing-box/config.json <<EOF
 EOF
 
 # ===== systemd =====
-echo "[4] setting systemd..."
+echo "[6/7] 启动服务..."
 
 cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
@@ -149,32 +178,32 @@ systemctl restart sing-box
 
 sleep 2
 
-# ===== self-check =====
-echo "[5] self check..."
+# ===== self check =====
+echo "[7/7] 自检..."
 
 if systemctl is-active --quiet sing-box; then
-  echo "OK: sing-box running"
+  echo "✔ 服务运行正常"
 else
-  echo "FAILED: service not running"
+  echo "❌ 服务启动失败"
   journalctl -u sing-box -e --no-pager | tail -50
   exit 1
 fi
 
-if ! ss -lntp | grep -q ":443"; then
-  echo "FAILED: port not listening"
+if ! ss -lntp | grep -q ":$PORT"; then
+  echo "❌ 端口未监听"
   exit 1
 fi
 
 # ===== output =====
 echo ""
 echo "=================================="
-echo "SETUP COMPLETE"
+echo "部署完成"
 echo "=================================="
 echo ""
-echo "SNI: $DOMAIN"
+
 echo "IP: $IP"
+echo "SNI: $DOMAIN"
 echo "PORT: $PORT"
-echo "=================================="
 echo ""
 
 echo "User1:"
@@ -190,8 +219,7 @@ echo "vless://$UUID3@$IP:$PORT?encryption=none&security=reality&sni=$DOMAIN&fp=c
 echo ""
 
 echo "=================================="
-echo "IMPORTANT:"
-echo "- Flow: xtls-rprx-vision"
-echo "- Security: reality"
-echo "- Fingerprint: chrome"
+echo "Flow: xtls-rprx-vision"
+echo "Security: reality"
+echo "Fingerprint: chrome"
 echo "=================================="
