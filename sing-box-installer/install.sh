@@ -1,28 +1,22 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-set -e
-
-echo "=================================="
-echo "sing-box Reality Enterprise v2"
-echo "Auto Version + Anti 404 Fix"
-echo "=================================="
-
-# ===== root check =====
-if [ "$EUID" -ne 0 ]; then
-  echo "❌ 请使用 root 运行"
-  exit 1
-fi
-
-# ===== deps =====
-apt update -y
-apt install -y curl jq ufw wget tar
-
-# ===== get latest version (方案2核心) =====
-echo "[1/7] 获取 sing-box 最新版本..."
+# Sing-box 简单安装脚本 - VLESS + Reality 单协议方案
+# 适用于 Ubuntu/Debian x86_64/arm64
 
 VERSION="1.13.0-rc.4"
+PORT="443"
+INSTALL_DIR="/usr/local/bin"
+CONFIG_DIR="/etc/sing-box"
+SERVICE_FILE="/etc/systemd/system/sing-box.service"
 
-echo "✔ 最新版本: $VERSION"
+# 颜色输出
+info() { echo -e "\033[32m[INFO]\033[0m $*"; }
+error() { echo -e "\033[31m[ERROR]\033[0m $*"; exit 1; }
+warning() { echo -e "\033[33m[WARN]\033[0m $*"; }
+
+# 检查 root 权限
+[[ $EUID -ne 0 ]] && error "请使用 root 权限运行"
 
 # 检测架构
 ARCH=$(uname -m)
@@ -32,197 +26,170 @@ case "$ARCH" in
     *) error "不支持的架构: $ARCH" ;;
 esac
 
-# ===== download =====
-echo "[2/7] 下载 sing-box..."
+# 获取服务器 IP
+SERVER_IP=$(ip addr show | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | cut -d/ -f1 | head -1)
+[[ -z "$SERVER_IP" ]] && error "无法获取服务器 IP"
 
-URL="https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box-${VERSION}-linux-${ARCH}.tar.gz"
+info "开始安装 Sing-box ${VERSION}..."
+info "架构: ${ARCH}"
+info "服务器 IP: ${SERVER_IP}"
 
-curl -fL "$URL" -o sing-box.tar.gz
+# 1. 下载 sing-box
+info "下载 sing-box 二进制文件..."
+cd /tmp
+DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box-${VERSION}-linux-${ARCH}.tar.gz"
+wget -q --show-progress "${DOWNLOAD_URL}" -O sing-box.tar.gz || error "下载失败"
 
-if [ ! -f sing-box.tar.gz ]; then
-  echo "❌ 下载失败（可能版本不存在）"
-  exit 1
-fi
+# 2. 验证并解压
+info "解压文件..."
+tar xzf sing-box.tar.gz || error "解压失败"
+chmod +x "sing-box-${VERSION}-linux-${ARCH}/sing-box"
+mv "sing-box-${VERSION}-linux-${ARCH}/sing-box" "${INSTALL_DIR}/" || error "安装失败"
+rm -rf sing-box.tar.gz "sing-box-${VERSION}-linux-${ARCH}"
 
-tar -xzf sing-box.tar.gz
+# 3. 生成密钥对
+info "生成 Reality 密钥对..."
+KEYS=$(${INSTALL_DIR}/sing-box generate reality-keypair)
+PRIVATE_KEY=$(echo "$KEYS" | grep "PrivateKey:" | awk '{print $2}')
+PUBLIC_KEY=$(echo "$KEYS" | grep "PublicKey:" | awk '{print $2}')
 
-install -m 755 sing-box-${SB_VERSION}-linux-amd64/sing-box /usr/local/bin/sing-box
+# 4. 生成 UUID
+UUID=$(cat /proc/sys/kernel/random/uuid)
 
-rm -rf sing-box.tar.gz sing-box-${SB_VERSION}-linux-amd64
+# 5. 生成 short_id (8 字节十六进制)
+SHORT_ID=$(openssl rand -hex 8)
 
-# ===== verify =====
-if ! command -v sing-box >/dev/null 2>&1; then
-  echo "❌ sing-box 安装失败"
-  exit 1
-fi
+info "生成的配置信息:"
+info "  UUID: ${UUID}"
+info "  Private Key: ${PRIVATE_KEY}"
+info "  Public Key: ${PUBLIC_KEY}"
+info "  Short ID: ${SHORT_ID}"
 
-echo "✔ sing-box 安装成功"
+# 6. 创建配置目录
+mkdir -p "${CONFIG_DIR}"
 
-# ===== sysctl (BBR) =====
-echo "[3/7] 优化网络..."
-
-cat >> /etc/sysctl.conf <<EOF
-
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-
-net.core.somaxconn=65535
-net.core.netdev_max_backlog=250000
-
-net.ipv4.tcp_keepalive_time=300
-net.ipv4.tcp_keepalive_intvl=30
-net.ipv4.tcp_keepalive_probes=5
-EOF
-
-sysctl -p
-
-# ===== firewall =====
-echo "[4/7] 防火墙设置..."
-
-ufw allow 443/tcp
-ufw allow OpenSSH
-ufw --force enable
-
-# ===== params =====
-echo "[5/7] 生成配置..."
-
-DOMAIN="www.microsoft.com"
-PORT=443
-SHORT_ID="a1b2c3d4e5f6"
-
-UUID1=$(cat /proc/sys/kernel/random/uuid)
-UUID2=$(cat /proc/sys/kernel/random/uuid)
-UUID3=$(cat /proc/sys/kernel/random/uuid)
-
-KEYS=$(sing-box generate reality-keypair)
-PRIVATE_KEY=$(echo "$KEYS" | grep PrivateKey | awk '{print $2}')
-PUBLIC_KEY=$(echo "$KEYS" | grep PublicKey | awk '{print $2}')
-
-IP=$(curl -s ifconfig.me)
-
-# ===== config =====
-mkdir -p /etc/sing-box
-
-cat > /etc/sing-box/config.json <<EOF
+# 7. 生成配置文件
+info "生成配置文件..."
+cat > "${CONFIG_DIR}/config.json" <<EOF
 {
   "log": {
-    "level": "info"
+    "level": "info",
+    "timestamp": true
   },
-
   "inbounds": [
     {
       "type": "vless",
+      "tag": "vless-in",
       "listen": "::",
-      "listen_port": $PORT,
-
+      "tcp_fast_open": true,
+      "sniff": true,
+      "sniff_override_destination": true,
+      "domain_strategy": "prefer_ipv4",
+      "listen_port": ${PORT},
       "users": [
-        { "uuid": "$UUID1" },
-        { "uuid": "$UUID2" },
-        { "uuid": "$UUID3" }
+        {
+          "uuid": "${UUID}",
+          "flow": "xtls-rprx-vision"
+        }
       ],
-
       "tls": {
         "enabled": true,
-        "server_name": "$DOMAIN",
-
+        "server_name": "www.microsoft.com",
         "reality": {
           "enabled": true,
-
           "handshake": {
-            "server": "$DOMAIN",
+            "server": "www.microsoft.com",
             "server_port": 443
           },
-
-          "private_key": "$PRIVATE_KEY",
-
+          "private_key": "${PRIVATE_KEY}",
           "short_id": [
-            "$SHORT_ID",
-            "b2c3d4e5",
-            "c3d4e5f6"
+            "${SHORT_ID}"
           ]
         }
-      },
-
-      "transport": {
-        "type": "tcp"
       }
     }
   ],
-
   "outbounds": [
     {
-      "type": "direct"
+      "type": "direct",
+      "tag": "direct"
+    },
+    {
+      "type": "block",
+      "tag": "block"
     }
   ]
 }
 EOF
 
-# ===== systemd =====
-echo "[6/7] 启动服务..."
-
-cat > /etc/systemd/system/sing-box.service <<EOF
+# 8. 创建 systemd 服务
+info "创建 systemd 服务..."
+cat > "${SERVICE_FILE}" <<EOF
 [Unit]
-Description=sing-box
-After=network.target
+Description=Sing-box Service
+Documentation=https://sing-box.sagernet.org
+After=network.target nss-lookup.target
 
 [Service]
-ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
-Restart=always
-RestartSec=3
-LimitNOFILE=1000000
+Type=simple
+ExecStart=${INSTALL_DIR}/sing-box run -c ${CONFIG_DIR}/config.json
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=infinity
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
+# 9. 配置防火墙
+info "配置防火墙..."
+if command -v ufw &> /dev/null; then
+    ufw allow ${PORT}/tcp >/dev/null 2>&1 || true
+    info "已开放 UFW 端口 ${PORT}"
+elif command -v firewall-cmd &> /dev/null; then
+    firewall-cmd --permanent --add-port=${PORT}/tcp >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+    info "已开放 firewalld 端口 ${PORT}"
+fi
+
+# 10. 启动服务
+info "启动 sing-box 服务..."
 systemctl daemon-reload
 systemctl enable sing-box
-systemctl restart sing-box
+systemctl start sing-box
 
+# 11. 检查状态
 sleep 2
-
-# ===== self check =====
-echo "[7/7] 自检..."
-
 if systemctl is-active --quiet sing-box; then
-  echo "✔ 服务运行正常"
+    info "✓ Sing-box 安装成功并已启动"
 else
-  echo "❌ 服务启动失败"
-  journalctl -u sing-box -e --no-pager | tail -50
-  exit 1
+    error "✗ Sing-box 启动失败，请检查日志: journalctl -u sing-box -n 50"
 fi
 
-if ! ss -lntp | grep -q ":$PORT"; then
-  echo "❌ 端口未监听"
-  exit 1
-fi
-
-# ===== output =====
-echo ""
-echo "=================================="
-echo "部署完成"
-echo "=================================="
-echo ""
-
-echo "IP: $IP"
-echo "SNI: $DOMAIN"
-echo "PORT: $PORT"
-echo ""
-
-echo "User1:"
-echo "vless://$UUID1@$IP:$PORT?encryption=none&security=reality&sni=$DOMAIN&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORT_ID&flow=xtls-rprx-vision&type=tcp#user1"
-echo ""
-
-echo "User2:"
-echo "vless://$UUID2@$IP:$PORT?encryption=none&security=reality&sni=$DOMAIN&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORT_ID&flow=xtls-rprx-vision&type=tcp#user2"
-echo ""
-
-echo "User3:"
-echo "vless://$UUID3@$IP:$PORT?encryption=none&security=reality&sni=$DOMAIN&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORT_ID&flow=xtls-rprx-vision&type=tcp#user3"
-echo ""
-
-echo "=================================="
-echo "Flow: xtls-rprx-vision"
-echo "Security: reality"
-echo "Fingerprint: chrome"
-echo "=================================="
+# 12. 生成客户端配置
+info ""
+info "=========================================="
+info "客户端配置信息"
+info "=========================================="
+info "协议: VLESS + Reality"
+info "服务器: ${SERVER_IP}"
+info "端口: ${PORT}"
+info "UUID: ${UUID}"
+info "Flow: xtls-rprx-vision"
+info "Public Key: ${PUBLIC_KEY}"
+info "Short ID: ${SHORT_ID}"
+info "SNI: www.microsoft.com"
+info "=========================================="
+info ""
+info "Shadowrocket/V2rayN/Nekobox 导入链接:"
+VLESS_LINK="vless://${UUID}@${SERVER_IP}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.microsoft.com&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none#Sing-box-Reality"
+echo "${VLESS_LINK}"
+info ""
+info "管理命令:"
+info "  查看状态: systemctl status sing-box"
+info "  查看日志: journalctl -u sing-box -f"
+info "  重启服务: systemctl restart sing-box"
+info "  停止服务: systemctl stop sing-box"
+info ""
+info "更换 UUID: 运行 change-uuid.sh 脚本"
+info "卸载: systemctl stop sing-box && systemctl disable sing-box && rm -rf ${INSTALL_DIR}/sing-box ${CONFIG_DIR} ${SERVICE_FILE}"
