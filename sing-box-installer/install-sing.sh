@@ -18,45 +18,45 @@ apt update -y
 apt install -y curl jq ufw wget tar
 
 # ===== get latest version (方案2核心) =====
-echo "[1/7] 获取 sing-box 最新版本..."
+echo "[1/7] 获取版本..."
 
 VERSION="1.13.0-rc.4"
 
-echo "✔ 最新版本: $VERSION"
+echo "✔ 版本: $VERSION"
 
-# 检测架构
 ARCH=$(uname -m)
 case "$ARCH" in
     x86_64) ARCH="amd64" ;;
     aarch64) ARCH="arm64" ;;
-    *) error "不支持的架构: $ARCH" ;;
+    *) echo "不支持架构: $ARCH"; exit 1 ;;
 esac
 
-# ===== download =====
 echo "[2/7] 下载 sing-box..."
 
-URL="https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box-${VERSION}-linux-${ARCH}.tar.gz"
+URL="https://github.com/SagerNet/sing-box/releases/download/${VERSION}/sing-box-${VERSION}-linux-${ARCH}.tar.gz"
+
+echo "URL: $URL"
 
 curl -fL "$URL" -o sing-box.tar.gz
 
-if [ ! -f sing-box.tar.gz ]; then
-  echo "❌ 下载失败（可能版本不存在）"
-  exit 1
-fi
-
 tar -xzf sing-box.tar.gz
 
-install -m 755 sing-box-${SB_VERSION}-linux-amd64/sing-box /usr/local/bin/sing-box
+# 🔥 关键：自动识别目录（避免再踩坑）
+DIR=$(ls -d sing-box-*linux-${ARCH} 2>/dev/null | head -n 1)
 
-rm -rf sing-box.tar.gz sing-box-${SB_VERSION}-linux-amd64
-
-# ===== verify =====
-if ! command -v sing-box >/dev/null 2>&1; then
-  echo "❌ sing-box 安装失败"
+if [ -z "$DIR" ]; then
+  echo "❌ 解压目录不存在"
+  ls -al
   exit 1
 fi
 
-echo "✔ sing-box 安装成功"
+echo "✔ 解压目录: $DIR"
+
+install -m 755 "$DIR/sing-box" /usr/local/bin/sing-box
+
+rm -rf sing-box.tar.gz "$DIR"
+
+echo "✔ sing-box 安装完成"
 
 # ===== sysctl (BBR) =====
 echo "[3/7] 优化网络..."
