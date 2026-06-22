@@ -20,19 +20,22 @@ apt install -y curl jq ufw wget tar
 # ===== get latest version (方案2核心) =====
 echo "[1/7] 获取 sing-box 最新版本..."
 
-SB_VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
+VERSION="1.13.0-rc.4"
 
-if [[ -z "$SB_VERSION" || "$SB_VERSION" == "null" ]]; then
-  echo "❌ 获取版本失败"
-  exit 1
-fi
+echo "✔ 最新版本: $VERSION"
 
-echo "✔ 最新版本: $SB_VERSION"
+# 检测架构
+ARCH=$(uname -m)
+case "$ARCH" in
+    x86_64) ARCH="amd64" ;;
+    aarch64) ARCH="arm64" ;;
+    *) error "不支持的架构: $ARCH" ;;
+esac
 
 # ===== download =====
 echo "[2/7] 下载 sing-box..."
 
-URL="https://github.com/SagerNet/sing-box/releases/download/${SB_VERSION}/sing-box-${SB_VERSION}-linux-amd64.tar.gz"
+URL="https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box-${VERSION}-linux-${ARCH}.tar.gz"
 
 curl -fL "$URL" -o sing-box.tar.gz
 
