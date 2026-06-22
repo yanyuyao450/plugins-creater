@@ -33,7 +33,7 @@ esac
 
 echo "[2/7] 下载 sing-box..."
 
-URL="https://github.com/SagerNet/sing-box/releases/download/${VERSION}/sing-box-${VERSION}-linux-${ARCH}.tar.gz"
+URL="https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box-${VERSION}-linux-${ARCH}.tar.gz"
 
 echo "URL: $URL"
 
